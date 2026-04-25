@@ -60,8 +60,8 @@ if [ "$ACTION" = "uninstall" ]; then
         echo "Removed $DEST"
     fi
     if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        local_cmd=$(jq -r '.statusLine.command // empty' "$SETTINGS" 2>/dev/null)
-        if [[ "$local_cmd" == *"statusline-command.sh"* ]]; then
+        installed_cmd=$(jq -r '.statusLine.command // empty' "$SETTINGS" 2>/dev/null)
+        if [[ "$installed_cmd" == *"statusline-command.sh"* ]]; then
             backup="${SETTINGS}.bak.$(date +%s)"
             cp "$SETTINGS" "$backup"
             jq 'del(.statusLine)' "$SETTINGS" > "${SETTINGS}.tmp" && mv "${SETTINGS}.tmp" "$SETTINGS"

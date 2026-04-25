@@ -8,6 +8,9 @@ if [ -z "$input" ]; then
     exit 0
 fi
 
+CACHE_DIR="/tmp/claude"
+mkdir -p "$CACHE_DIR"
+
 # ── Colors ──────────────────────────────────────────────
 blue='\033[38;2;0;153;255m'
 orange='\033[38;2;255;176;85m'
@@ -36,10 +39,10 @@ format_tokens() {
 
 color_for_pct() {
     local pct=$1
-    if [ "$pct" -ge 90 ]; then printf "$red"
-    elif [ "$pct" -ge 70 ]; then printf "$yellow"
-    elif [ "$pct" -ge 50 ]; then printf "$orange"
-    else printf "$green"
+    if [ "$pct" -ge 90 ]; then printf "%s" "$red"
+    elif [ "$pct" -ge 70 ]; then printf "%s" "$yellow"
+    elif [ "$pct" -ge 50 ]; then printf "%s" "$orange"
+    else printf "%s" "$green"
     fi
 }
 
@@ -159,9 +162,8 @@ get_oauth_token() {
 
 # ── Subscription info (cached) ─────────────────────────
 get_subscription_info() {
-    local auth_cache="/tmp/claude/statusline-auth-cache.json"
+    local auth_cache="${CACHE_DIR}/statusline-auth-cache.json"
     local auth_cache_max_age=60
-    mkdir -p /tmp/claude
 
     if [ -f "$auth_cache" ]; then
         local cache_mtime
@@ -179,8 +181,9 @@ get_subscription_info() {
     local blob
     blob=$(read_oauth_blob)
     if [ -n "$blob" ]; then
-        sub_type=$(echo "$blob" | jq -r '.claudeAiOauth.subscriptionType // empty' 2>/dev/null)
-        rate_tier=$(echo "$blob" | jq -r '.claudeAiOauth.rateLimitTier // empty' 2>/dev/null)
+        IFS=$'\t' read -r sub_type rate_tier < <(echo "$blob" | jq -r '
+            [.claudeAiOauth.subscriptionType // "",
+             .claudeAiOauth.rateLimitTier // ""] | @tsv' 2>/dev/null)
     fi
 
     local result
@@ -189,29 +192,45 @@ get_subscription_info() {
     echo "$result"
 }
 
-# ── Extract JSON data ───────────────────────────────────
-model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
+# ── Extract JSON data (single jq pass) ─────────────────
+# Compatible with macOS system bash 3.2 (no mapfile).
+fields=()
+while IFS= read -r line; do
+    fields+=("$line")
+done < <(echo "$input" | jq -r '
+  [
+    (.model.display_name // "Claude"),
+    (.context_window.context_window_size | tonumber? // 200000),
+    (.context_window.current_usage.input_tokens | tonumber? // 0),
+    (.context_window.current_usage.cache_creation_input_tokens | tonumber? // 0),
+    (.context_window.current_usage.cache_read_input_tokens | tonumber? // 0),
+    (.cost.total_cost_usd // ""),
+    (.cwd // ""),
+    (.session.start_time // ""),
+    (.worktree.name // ""),
+    ((.rate_limits != null) | tostring),
+    (.rate_limits // {} | tojson)
+  ] | .[]
+' 2>/dev/null)
 
-size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
-[[ "$size" =~ ^[0-9]+$ ]] || size=200000
+model_name="${fields[0]:-Claude}"
+size="${fields[1]:-200000}"
+input_tokens="${fields[2]:-0}"
+cache_create="${fields[3]:-0}"
+cache_read="${fields[4]:-0}"
+total_cost="${fields[5]:-}"
+cwd="${fields[6]:-}"
+session_start="${fields[7]:-}"
+worktree_name="${fields[8]:-}"
+has_native_rl="${fields[9]:-false}"
+native_rl_json="${fields[10]:-{}}"
+
 [ "$size" -eq 0 ] && size=200000
-
-input_tokens=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // 0')
-cache_create=$(echo "$input" | jq -r '.context_window.current_usage.cache_creation_input_tokens // 0')
-cache_read=$(echo "$input" | jq -r '.context_window.current_usage.cache_read_input_tokens // 0')
-[[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
-[[ "$cache_create" =~ ^[0-9]+$ ]] || cache_create=0
-[[ "$cache_read" =~ ^[0-9]+$ ]] || cache_read=0
 current=$(( input_tokens + cache_create + cache_read ))
 
-used_tokens=$(format_tokens $current)
-total_tokens=$(format_tokens $size)
-
-if [ "$size" -gt 0 ]; then
-    pct_used=$(( current * 100 / size ))
-else
-    pct_used=0
-fi
+used_tokens=$(format_tokens "$current")
+total_tokens=$(format_tokens "$size")
+pct_used=$(( current * 100 / size ))
 
 effort="default"
 settings_path="$HOME/.claude/settings.json"
@@ -219,35 +238,28 @@ if [ -f "$settings_path" ]; then
     effort=$(jq -r '.effortLevel // "default"' "$settings_path" 2>/dev/null)
 fi
 
-total_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // empty')
-
 # ── Subscription / API mode ────────────────────────────
 sub_info=$(get_subscription_info)
-sub_type=$(echo "$sub_info" | jq -r '.subscriptionType // empty')
-rate_tier=$(echo "$sub_info" | jq -r '.rateLimitTier // empty')
+IFS=$'\t' read -r sub_type rate_tier < <(echo "$sub_info" | jq -r '
+    [.subscriptionType // "", .rateLimitTier // ""] | @tsv')
 
 is_subscription=false
 sub_display=""
-if [ -n "$sub_type" ] && [ "$sub_type" != "null" ] && [ "$sub_type" != "" ]; then
+if [ -n "$sub_type" ] && [ "$sub_type" != "null" ]; then
     is_subscription=true
-    # Capitalize first letter
-    sub_display=$(echo "$sub_type" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+    # Capitalize first letter (bash 3.2 compatible — uses awk)
+    sub_display=$(awk -v s="$sub_type" 'BEGIN {print toupper(substr(s,1,1)) tolower(substr(s,2))}')
     # Extract tier multiplier (e.g., "5x" from "default_claude_max_5x")
-    if [ -n "$rate_tier" ] && [ "$rate_tier" != "null" ]; then
-        tier_mult=$(echo "$rate_tier" | grep -o '[0-9]\+x' | tail -1)
-        if [ -n "$tier_mult" ]; then
-            sub_display="${sub_display} ${tier_mult}"
-        fi
+    if [ -n "$rate_tier" ] && [ "$rate_tier" != "null" ] && [[ "$rate_tier" =~ ([0-9]+x) ]]; then
+        sub_display="${sub_display} ${BASH_REMATCH[1]}"
     fi
 fi
 
-# ── Worktree ───────────────────────────────────────────
-worktree_name=$(echo "$input" | jq -r '.worktree.name // empty')
-
 # ── LINE 1 ─────────────────────────────────────────────
 pct_color=$(color_for_pct "$pct_used")
-cwd=$(echo "$input" | jq -r '.cwd // ""')
-[ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
+if [ -z "$cwd" ] || [ "$cwd" = "null" ]; then
+    cwd=$(pwd)
+fi
 dirname=$(basename "$cwd")
 
 git_branch=""
@@ -260,7 +272,6 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 session_duration=""
-session_start=$(echo "$input" | jq -r '.session.start_time // empty')
 if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
     start_epoch=$(iso_to_epoch "$session_start")
     if [ -n "$start_epoch" ]; then
@@ -372,42 +383,41 @@ if $needs_api_refresh; then
     fi
 fi
 
-# Helper: build a rate limit segment with hybrid data
-# Native % preferred, API resets_at always, API as full fallback if native is null
+# Helper: build a rate limit segment with hybrid data.
+# Native % preferred, API resets_at always, API as full fallback if native is null.
+# Reads from $native_rl_json (extracted upfront) and $api_data (cached).
 build_rl_segment() {
     local label="$1"
-    local native_path="$2"
-    local api_field="$3"
-    local window="$4"
+    local key="$2"
+    local window="$3"
 
-    local pct="" reset_iso=""
-
-    # Try native data for pct (utilization only — resets_at comes from API)
-    local native_exists
-    native_exists=$(echo "$input" | jq -r "${native_path} // empty" 2>/dev/null)
-    if [ -n "$native_exists" ] && [ "$native_exists" != "null" ]; then
-        pct=$(echo "$input" | jq -r "${native_path}.used_percentage // ${native_path}.utilization // empty" 2>/dev/null | awk '{printf "%.0f", $1}')
+    local native_pct=""
+    if [ "$has_native_rl" = "true" ]; then
+        native_pct=$(echo "$native_rl_json" | jq -r --arg k "$key" '
+            .[$k] // null |
+            if . == null then ""
+            elif .used_percentage != null then (.used_percentage | floor)
+            elif .utilization != null then (.utilization | floor)
+            else "" end' 2>/dev/null)
     fi
 
-    # API: authoritative source for resets_at; fallback for pct if native missing
+    local api_pct="" api_reset=""
     if [ -n "$api_data" ]; then
-        local api_exists
-        api_exists=$(echo "$api_data" | jq -r ".${api_field} // empty" 2>/dev/null)
-        if [ -n "$api_exists" ] && [ "$api_exists" != "null" ]; then
-            reset_iso=$(echo "$api_data" | jq -r ".${api_field}.resets_at // empty")
-            if [ -z "$pct" ] || [ "$pct" = "0" -a -z "$native_exists" ]; then
-                pct=$(echo "$api_data" | jq -r ".${api_field}.utilization // 0" | awk '{printf "%.0f", $1}')
-            fi
-        fi
+        IFS=$'\t' read -r api_pct api_reset < <(echo "$api_data" | jq -r --arg k "$key" '
+            .[$k] // null |
+            if . == null then "\t"
+            else "\((.utilization // 0) | floor)\t\(.resets_at // "")"
+            end' 2>/dev/null)
     fi
 
+    local pct="${native_pct:-$api_pct}"
     [ -z "$pct" ] && return 1
 
     local bar pct_color pct_fmt reset_str
     bar=$(build_bar "$pct" "$bar_width")
     pct_color=$(color_for_pct "$pct")
     pct_fmt=$(printf "%3d" "$pct")
-    reset_str=$(format_reset_compact "$reset_iso" "$window")
+    reset_str=$(format_reset_compact "$api_reset" "$window")
 
     local segment="${white}${label}${reset} ${bar} ${pct_color}${pct_fmt}%${reset}"
     if [ -n "$reset_str" ]; then
@@ -418,55 +428,38 @@ build_rl_segment() {
     return 0
 }
 
-# Check if we have any rate limit data at all
-has_native_rl=$(echo "$input" | jq -r '.rate_limits // empty')
-has_any_rl=false
-if [ -n "$has_native_rl" ] && [ "$has_native_rl" != "null" ]; then
-    has_any_rl=true
-elif [ -n "$api_data" ]; then
-    has_any_rl=true
-fi
-
-if $has_any_rl; then
-    # Build current (five_hour)
-    seg=$(build_rl_segment "current" ".rate_limits.five_hour" "five_hour" "five_hour")
-    if [ -n "$seg" ]; then
-        rate_line+="$seg"
-    fi
-
-    # Build weekly (seven_day)
-    seg=$(build_rl_segment "weekly" ".rate_limits.seven_day" "seven_day" "seven_day")
-    if [ -n "$seg" ]; then
-        [ -n "$rate_line" ] && rate_line+="$rl_sep"
-        rate_line+="$seg"
-    fi
-
-    # Build sonnet (seven_day_sonnet) — only if data exists
-    seg=$(build_rl_segment "sonnet" ".rate_limits.seven_day_sonnet" "seven_day_sonnet" "seven_day")
-    if [ -n "$seg" ]; then
-        [ -n "$rate_line" ] && rate_line+="$rl_sep"
-        rate_line+="$seg"
-    fi
-
+if [ "$has_native_rl" = "true" ] || [ -n "$api_data" ]; then
+    for entry in "current:five_hour:five_hour" \
+                 "weekly:seven_day:seven_day" \
+                 "sonnet:seven_day_sonnet:seven_day"; do
+        IFS=':' read -r label key window <<<"$entry"
+        seg=$(build_rl_segment "$label" "$key" "$window")
+        if [ -n "$seg" ]; then
+            [ -n "$rate_line" ] && rate_line+="$rl_sep"
+            rate_line+="$seg"
+        fi
+    done
 fi
 
 # ── Extra usage (separate line) ─────────────────────────
 extra_line=""
 extra_src=""
-if [ -n "$has_native_rl" ] && [ "$has_native_rl" != "null" ]; then
-    extra_src="$input"
-    extra_prefix=".rate_limits"
+if [ "$has_native_rl" = "true" ]; then
+    extra_src="$native_rl_json"
 elif [ -n "$api_data" ]; then
     extra_src="$api_data"
-    extra_prefix=""
 fi
 
 if [ -n "$extra_src" ]; then
-    extra_enabled=$(echo "$extra_src" | jq -r "${extra_prefix}.extra_usage.is_enabled // false" 2>/dev/null)
+    IFS=$'\t' read -r extra_enabled extra_pct extra_used_cents extra_limit_cents \
+        < <(echo "$extra_src" | jq -r '
+            [(.extra_usage.is_enabled // false | tostring),
+             ((.extra_usage.utilization // 0) | floor),
+             (.extra_usage.used_credits // 0),
+             (.extra_usage.monthly_limit // 0)] | @tsv' 2>/dev/null)
     if [ "$extra_enabled" = "true" ]; then
-        extra_pct=$(echo "$extra_src" | jq -r "${extra_prefix}.extra_usage.utilization // 0" | awk '{printf "%.0f", $1}')
-        extra_used=$(echo "$extra_src" | jq -r "${extra_prefix}.extra_usage.used_credits // 0" | awk '{printf "%.2f", $1/100}')
-        extra_limit=$(echo "$extra_src" | jq -r "${extra_prefix}.extra_usage.monthly_limit // 0" | awk '{printf "%.2f", $1/100}')
+        extra_used=$(awk "BEGIN {printf \"%.2f\", $extra_used_cents / 100}")
+        extra_limit=$(awk "BEGIN {printf \"%.2f\", $extra_limit_cents / 100}")
         extra_bar=$(build_bar "$extra_pct" "$bar_width")
         extra_pct_color=$(color_for_pct "$extra_pct")
 
