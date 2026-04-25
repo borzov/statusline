@@ -1,7 +1,27 @@
+# OS
 .DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Backups & temp
 *.bak
 *.bak.*
 *.tmp
-.idea/
-.vscode/
+*.log
+
+# Generated artifacts from screenshot.sh
+*.ansi
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Defensive — in case anyone adds JS tooling later
 node_modules/
