@@ -58,13 +58,13 @@ cat > /tmp/claude/statusline-usage-cache.json <<EOF
 EOF
 touch /tmp/claude/statusline-usage-cache.json
 
-INPUT_HERO=$(jq -n --arg ts "$SESSION_START" '{
+INPUT_HERO=$(jq -n --arg ts "$SESSION_START" --arg cwd "$HOME/projects/statusline" '{
   model: {display_name: "Sonnet 4.6"},
   context_window: {
     context_window_size: 200000,
     current_usage: {input_tokens: 8000, cache_creation_input_tokens: 12000, cache_read_input_tokens: 35000}
   },
-  cwd: "/Users/borzov/Develop/statusline",
+  cwd: $cwd,
   session: {start_time: $ts}
 }')
 
@@ -82,13 +82,13 @@ cat > /tmp/claude/statusline-usage-cache.json <<EOF
 EOF
 touch /tmp/claude/statusline-usage-cache.json
 
-INPUT_EXTRA=$(jq -n --arg ts "$SESSION_START" '{
+INPUT_EXTRA=$(jq -n --arg ts "$SESSION_START" --arg cwd "$HOME/projects/myproject" '{
   model: {display_name: "Opus 4.7"},
   context_window: {
     context_window_size: 200000,
     current_usage: {input_tokens: 35000, cache_creation_input_tokens: 18000, cache_read_input_tokens: 75000}
   },
-  cwd: "/Users/borzov/Develop/myproject",
+  cwd: $cwd,
   session: {start_time: $ts}
 }')
 
@@ -112,13 +112,13 @@ cat > /tmp/claude/statusline-usage-cache.json <<EOF
 EOF
 touch /tmp/claude/statusline-usage-cache.json
 
-INPUT_API=$(jq -n --arg ts "$SESSION_START" '{
+INPUT_API=$(jq -n --arg ts "$SESSION_START" --arg cwd "$HOME/projects/myproject" '{
   model: {display_name: "Sonnet 4.6"},
   context_window: {
     context_window_size: 200000,
     current_usage: {input_tokens: 95000, cache_creation_input_tokens: 12000, cache_read_input_tokens: 65000}
   },
-  cwd: "/Users/borzov/Develop/myproject",
+  cwd: $cwd,
   session: {start_time: $ts},
   cost: {total_cost_usd: 3.42}
 }')
